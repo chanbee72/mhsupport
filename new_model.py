@@ -95,7 +95,6 @@ def one_hot_encoding(label, label2idx):
 is_label_v = [one_hot_encoding(label, label2idx) for label in is_label]
 is_label_v = torch.tensor(is_label_v).to(device)
 
-
 Q = Q.to(device)
 K = K.to(device)
 V = V.to(device)
