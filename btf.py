@@ -1,13 +1,15 @@
 import torch
-import torch.nn as nn
+from torch import nn, Tensor
 from torch.utils.data import DataLoader
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from transformers import RobertaTokenizer, RobertaModel, logging
 import spacy
+import math
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support
 from captum.attr import IntegratedGradients
+from tqdm import tqdm
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -42,9 +44,7 @@ class model(nn.Module):
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=6)
 
-        self.pos_encoding = self.get_sinusoid_encoding_table(self.max_sentence_num*512, 768)
-        self.pos_encoding = torch.tensor(self.pos_encoding)
-        self.nn_pos = nn.Embedding.from_pretrained(self.pos_encoding, freeze=True)
+        self.pos_encoder = PositionalEncoding(d_model=768, dropout=dropout, max_len=max_sentence_num)
 
     def forward(self, inputs):
         emb_vec = self.get_embedding(inputs)
@@ -61,15 +61,15 @@ class model(nn.Module):
         vectors = torch.empty((0,self.max_sentence_num*768)).to(device) # num_comment * (max_sentence_num*768)
         for comment in comments:
             sents = self.text2sent(comment)
-            embs = self.sent2emb(sents) # num_sentence * 512 * 768
-            embs, masks = self.embedding_padding(embs)
-          
-            embs = embs.type(torch.float32)
-            print(masks.size())
-            encoding = self.encoder(embs, masks) # max_sentence_num * 512 * 768
-            cls_encoding = encoding[:,0,:]
+            embs = self.sent2emb(sents) # num_sentence * 768
+            embs, masks = self.embedding_padding(embs) # embs: num_sentence * 768 masks: 
 
-            vector = torch.flatten(cls_encoding)
+            embs = embs.type(torch.float32)
+            embs = embs.unsqueeze(0) # 1 * max_sentence_num * 768
+            #embs = embs.unsqueeze(1) # max_sentence_num * 1 * 768
+            encoding = self.encoder(embs) # 1 * max_sentence_num * 768
+
+            vector = torch.flatten(encoding)
             vector = vector.unsqueeze(0)
 
             vectors = torch.cat((vectors, vector))
@@ -87,53 +87,43 @@ class model(nn.Module):
     def sent2emb(self, sents):
         encodings = tokenizer(sents, return_tensors='pt', truncation=True, padding='max_length', max_length=512)
         encodings.to(device)
-        outputs = roberta(**encodings)
-        input_embs = outputs[0] # num_sentence * 512(tokenizer max_length) * 768
-        #input_embs = outputs[1] # num_sentence * 768 ( CLS token embedding )
-
-        inputs = encodings['input_ids'] # num_sentence * 512
-
-        positions = torch.empty((0, 512)).to(device)
-        s = 1
-        for i in range(len(sents)):
-            pos = torch.arange(s, s+512).to(device)
-            pos_mask = inputs[i].eq(1)
-            pos.masked_fill_(pos_mask, 0)
-            pos = pos.unsqueeze(0)
-            positions = torch.cat((positions, pos))
-            s = pos.max()
-        positions = positions.to(torch.int64)
         
-        self.nn_pos.to(device)
-        positions.to(device)
-        pos_embs = self.nn_pos(positions) # num_sentence * 512 * 768
+        outputs = roberta(**encodings)
+        embs = outputs[1] # num_sentence * 768 ( CLS token embedding )
+        embs = self.pos_encoder(embs) # num_sentence * 768
 
-        embeddings = input_embs + pos_embs # num_sentence * 512 * 768
-
-        return embeddings
+        return embs
 
     def embedding_padding(self, embs):
-        num_sentence = embs.size()[0]
+        num_sentence = embs.size(0)
         num_padding = self.max_sentence_num - num_sentence
-        padding_emb = torch.zeros((num_padding,512,768)).to(device)
-        embs = torch.cat((embs, padding_emb))
-        
-        masks = torch.logical_not(embs.eq(0))
+        padding_emb = torch.zeros((num_padding, 768)).to(device)
+        embs = torch.cat((embs, padding_emb)) # max_sentence_num * 768
+
+        masks = torch.ones((self.max_sentence_num, self.max_sentence_num))
+        masks[:, num_sentence:] = 0
+        #masks[num_sentence:, :] = 0
 
         return embs, masks
 
 
-    def get_sinusoid_encoding_table(self, n_seq, d_hidn):
-        def cal_angle(position, i_hidn):
-            return position / np.power(10000, 2*(i_hidn//2) / d_hidn)
-        def get_posi_angle_vec(position):
-            return [cal_angle(position, i_hidn) for i_hidn in range(d_hidn)]
-        
-        sinusoid_table = np.array([get_posi_angle_vec(i_seq) for i_seq in range(n_seq)])
-        sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])
-        sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])
 
-        return sinusoid_table
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float=0.1, max_len: int=5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1) # max_len * 1
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, d_model) # max_len * 768
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self. register_buffer('pe', pe)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+
 
 
 def get_max_sent_num(comments):
@@ -245,7 +235,7 @@ loss_fn = nn.CrossEntropyLoss()
 num_epochs = 50
 max_acc = 0
 
-for i in range(num_epochs):
+for i in tqdm(range(num_epochs)):
     print("Epoch {:}".format(i+1))
     train(train_dataloader, model, optimizer, loss_fn)
     y_true, y_pred, max_acc = test(test_dataloader, model, loss_fn, max_acc)
@@ -260,6 +250,5 @@ for i in range(num_epochs):
     print('support   :', result[2])
     print('='*50)
 
-    break
 
 
