@@ -42,7 +42,7 @@ class model(nn.Module):
         self.max_sentence_num = max_sentence_num
 
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=8)
-        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=6)
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=6).to(device)
 
         self.pos_encoder = PositionalEncoding(d_model=768, dropout=dropout, max_len=max_sentence_num)
 
@@ -62,12 +62,16 @@ class model(nn.Module):
         for comment in comments:
             sents = self.text2sent(comment)
             embs = self.sent2emb(sents) # num_sentence * 768
-            embs, masks = self.embedding_padding(embs) # embs: num_sentence * 768 masks: 
+            embs, masks = self.embedding_padding(embs) # embs: num_sentence * 768 masks: 85 * 85
+            embs.to(device)
+            masks.to(device)
+            self.encoder.to(device)
 
             embs = embs.type(torch.float32)
-            embs = embs.unsqueeze(0) # 1 * max_sentence_num * 768
-            #embs = embs.unsqueeze(1) # max_sentence_num * 1 * 768
-            encoding = self.encoder(embs) # 1 * max_sentence_num * 768
+            masks = masks.type(torch.float32)
+            #embs = embs.unsqueeze(0) # 1 * max_sentence_num * 768
+            embs = embs.unsqueeze(1) # max_sentence_num * 1 * 768
+            encoding = self.encoder(embs, src_key_padding_mask=masks) # max_sentence_num * 1 * 768
 
             vector = torch.flatten(encoding)
             vector = vector.unsqueeze(0)
@@ -104,7 +108,11 @@ class model(nn.Module):
         masks[:, num_sentence:] = 0
         #masks[num_sentence:, :] = 0
 
-        return embs, masks
+        masks_ = torch.ones((num_sentence))
+        masks_ = torch.cat((masks_, torch.zeros((num_padding))))
+        masks_ = masks_.unsqueeze(0).to(device)
+
+        return embs, masks_
 
 
 
