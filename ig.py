@@ -227,6 +227,7 @@ with torch.no_grad():
         att = interprete_comment(model, comment, label)
         
         att = att.view([1, -1, att.size(1)//max_sent_num])
+        att = torch.abs(att)
         snt_score = att.sum(dim=-1).squeeze()
         idx = torch.argmax(snt_score)
 
