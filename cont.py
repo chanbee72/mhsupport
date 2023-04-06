@@ -27,7 +27,7 @@ for name, param in roberta.named_parameters():
 
 nlp = spacy.load('en_core_web_sm')
 
-basedata = pd.read_csv('basedata_b.csv')
+basedata = pd.read_csv('basedata.csv')
 train_data, test_data = train_test_split(basedata, test_size=0.2, random_state=99)
 train_data, valid_data = train_test_split(train_data, test_size=0.2, random_state=99)
 
@@ -260,28 +260,40 @@ class Dataset(torch.utils.data.Dataset):
         return len(self.labels)
 
 
-def make_cmt_pair(comment_keys, labels, num=6):
+def make_cmt_pair(comment_keys, labels, num=1):
     cmt_key_pairs = []
     pair_labels = []
 
-    label_dict = {(0,0):0, (0,1):1, (0,2):2, (1,0):3, (1,1):4, (1,2):5, (2,0):6, (2,1):7, (2,2):8}
+    pair2label = {(0,0):0, (0,1):1, (0,2):2, (1,0):3, (1,1):4, (1,2):5, (2,0):6, (2,1):7, (2,2):8}
 
     for i, cmt_key1 in enumerate(comment_keys):
         for j, cmt_key2 in enumerate(comment_keys):
             if i==j: continue
 
             pair = (cmt_key1, cmt_key2)
-            label = label_dict[(labels[i], labels[j])]
+            label = pair2label[(labels[i], labels[j])]
             cmt_key_pairs.append(pair)
             pair_labels.append(label)
 
+    print('total comment pair:', len(cmt_key_pairs))
+
+    # cmt_key_pairs : [(key1, key2), ...]
+    # pair_labels : [label1, label2, ...]
+    # pair2label : { (key1's is_score, key2's is_socre):label, ... }
 
 
-    label_dict2 = {0:0, 1:-1, 2:-2, 3:1, 4:0, 5:-1, 6:2, 7:1, 8:0}
+    label2score = {0:0, 1:-1, 2:-2, 3:1, 4:0, 5:-1, 6:2, 7:1, 8:0}
 
 
     if num%6 != 0:
-        pair_labels = [label_dict2[l]+2 for l in pair_labels]
+
+        pair_labels = [label2score[l]+2 for l in pair_labels]
+        
+        pairs_dict = { key_pair:label for (key_pair, label) in zip(cmt_key_pairs, pair_labels) }
+
+        random.shuffle(cmt_key_pairs)
+        pair_labels = [pairs_dict[key_pair] for key_pair in cmt_key_pairs]
+        print('Return whole comment pair')
         return cmt_key_pairs, pair_labels
 
     
@@ -290,24 +302,28 @@ def make_cmt_pair(comment_keys, labels, num=6):
     new_cmt_key_pairs = []
     new_pair_labels = []
 
-    for (l1, l2) in label_dict:
-        l = label_dict[(l1, l2)]
-        idx = np.where(pair_labels==l)[0]
+    print('Balancing...')
+    print("(key1's is_score, key2's is_score) num_pairs --> new_score num_pairs")
+    for (pair, label) in pair2label.items():
+        idx = np.where(pair_labels==label)[0]
         key_pairs = [cmt_key_pairs[i] for i in idx]
 
-        ll = label_dict2[l]
+        print('Before -', pair, len(key_pairs))
 
-        if ll == 0:
+        score = label2score[label]
+
+        if score == 0:
             _num = num//3
-        elif ll == 1 or ll == -1:
+        elif score == 1 or score == -1:
             _num = num//2
         else:
             _num = num
         
         random_idx = np.random.choice(len(key_pairs), _num, replace=False)
+        print('After  -', score, len(random_idx))
 
         new_cmt_key_pairs += [key_pairs[i] for i in random_idx]
-        new_pair_labels += [ll+2]*_num
+        new_pair_labels += [score+2]*_num
     
     
     pairs_dict = { key_pair:label for (key_pair, label) in zip(new_cmt_key_pairs, new_pair_labels) }
@@ -315,6 +331,7 @@ def make_cmt_pair(comment_keys, labels, num=6):
     random.shuffle(new_cmt_key_pairs)
     new_pair_labels = [pairs_dict[key_pair] for key_pair in new_cmt_key_pairs]
 
+    print("# of comment pairs : {}".format(len(new_pair_labels)))
     return new_cmt_key_pairs, new_pair_labels
 
 def label2vec(labels):
@@ -360,7 +377,7 @@ def train(dataloader, model, optimizer, loss_fn):
 
     epoch_loss = 0
     size = len(dataloader.dataset)
-
+    acc = 0
 
     for i, batch in enumerate(dataloader):
         texts1 = batch['texts1']
@@ -369,8 +386,8 @@ def train(dataloader, model, optimizer, loss_fn):
 
         outputs = model(texts1, texts2)
 
-        print('pred', outputs.softmax(1).argmax(1))
-        print('corr', labels.softmax(1).argmax(1))
+        #print('pred', outputs.softmax(1).argmax(1))
+        #print('corr', labels.softmax(1).argmax(1))
 
         optimizer.zero_grad()
         loss = loss_fn(outputs, labels)
@@ -378,7 +395,10 @@ def train(dataloader, model, optimizer, loss_fn):
         loss.backward()
         optimizer.step()
 
-    print('Training Loss: {:.3f}'.format(epoch_loss/size))
+        acc += (outputs.softmax(1).argmax(1) == labels.softmax(1).argmax(1)).type(torch.float).sum().item()
+    acc /= size
+
+    print('Training Loss: {:.3f}, Accuracy: {:.3f}'.format(epoch_loss/size, acc*100))
 
 def test(dataloader, model, loss_fn):
     model.eval()
@@ -393,7 +413,7 @@ def test(dataloader, model, loss_fn):
             labels = batch['labels'].to(device)
 
             outputs = model(texts1, texts2)
-            #print(outputs.softmax(1).argmax(1))
+            print(outputs.softmax(1).argmax(1))
 
             test_loss += loss_fn(outputs, labels).item()
             acc += (outputs.softmax(1).argmax(1) == labels).type(torch.float).sum().item()
@@ -404,12 +424,12 @@ def test(dataloader, model, loss_fn):
         print('Test Loss: {:.3f}, Accuracy: {:.3f}%'.format(test_loss, acc*100))
 
 #max_sent_num = get_max_sent_num(basedata['comment_text'].tolist())
-snt_num = 20
+sent_num = 20
 
 
-btf = model(768, 768, 3, sentence_num=snt_num, dropout=0.2)
+btf = model(768, 768, 3, sentence_num=sent_num, dropout=0.2)
 btf.to(device)
-btf.load_state_dict(torch.load('btf_is_20.pt'))
+btf.load_state_dict(torch.load('btf_is_{}.pt'.format(sent_num)))
 
 cont_model = cont_model(768, 768, 5, btf, dropout=0.2)
 cont_model.to(device)
@@ -417,29 +437,34 @@ cont_model.to(device)
 with open('cmt_roberta_emb.pickle', 'rb') as f:
     embs_dict = pickle.load(f)
 
-comment_key_pairs, labels = make_cmt_pair(train_data['comment_key'].tolist(), (train_data['is_score']-1).tolist(), 6*300)
+#print(len(train_data)) # 252
+#print(len(test_data))  # 64
+
+print('Make train pairs...')
+comment_key_pairs, labels = make_cmt_pair(train_data['comment_key'].tolist(), (train_data['is_score']-1).tolist(), 6*1000)
 labels = label2vec(labels)
 cmt_emb_pairs = key2emb(comment_key_pairs, embs_dict)
 
 emb1 = [pair[0] for pair in cmt_emb_pairs]
 emb2 = [pair[1] for pair in cmt_emb_pairs]
-emb1 = emb_padding(snt_num, emb1)
-emb2 = emb_padding(snt_num, emb2)
+emb1 = emb_padding(sent_num, emb1)
+emb2 = emb_padding(sent_num, emb2)
 # emb1 = emb1[:20]
 # emb2 = emb2[:20]
 
 train_dataset = Dataset(emb1, emb2, labels)
 train_dataloader = DataLoader(train_dataset, batch_size=8)
 
-
-comment_key_pairs, labels = make_cmt_pair(valid_data['comment_key'].tolist(), (valid_data['is_score']-1).tolist(), 6*30)
+print('-'*50)
+print('Make test pairs...')
+comment_key_pairs, labels = make_cmt_pair(valid_data['comment_key'].tolist(), (valid_data['is_score']-1).tolist())
 cmt_emb_paris = key2emb(comment_key_pairs, embs_dict)
 
 
 emb1 = [pair[0] for pair in cmt_emb_pairs]
 emb2 = [pair[1] for pair in cmt_emb_pairs]
-emb1 = emb_padding(snt_num, emb1)
-emb2 = emb_padding(snt_num, emb2)
+emb1 = emb_padding(sent_num, emb1)
+emb2 = emb_padding(sent_num, emb2)
 
 test_dataset = Dataset(emb1, emb2, labels)
 test_dataloader = DataLoader(test_dataset, batch_size=8)
@@ -456,6 +481,7 @@ for i, (name, param) in enumerate(cont_model.named_parameters()):
         param.requires_grad = False
     
 
+print('='*50)
 for i in tqdm(range(num_epochs)):
     print('Epoch {:}'.format(i+1))
     train(train_dataloader, cont_model, optimizer, loss_fn)
