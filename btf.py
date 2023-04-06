@@ -29,9 +29,9 @@ train_data, test_data = train_test_split(basedata, test_size=0.2, random_state=9
 
 
 class model(nn.Module):
-    def __init__(self, in_size, hid_size, out_size, max_sentence_num, dropout=0.1):
+    def __init__(self, in_size, hid_size, out_size, sentence_num, dropout=0.1):
         super().__init__()
-        self.linear1 = nn.Linear(in_size*max_sentence_num, hid_size)
+        self.linear1 = nn.Linear(in_size*sentence_num, hid_size)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
         self.linear2 = nn.Linear(hid_size, hid_size)
@@ -39,12 +39,12 @@ class model(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.linear3 = nn.Linear(hid_size, out_size)
 
-        self.max_sentence_num = max_sentence_num
+        self.sentence_num = sentence_num
 
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=8)
-        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=6).to(device)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=4)
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=3).to(device)
 
-        self.pos_encoder = PositionalEncoding(d_model=768, dropout=dropout, max_len=max_sentence_num)
+        self.pos_encoder = PositionalEncoding(d_model=768, dropout=dropout, max_len=100)
 
     def forward(self, inputs):
         emb_vec = self.get_embedding(inputs)
@@ -58,11 +58,11 @@ class model(nn.Module):
         return h
 
     def get_embedding(self, comments):
-        vectors = torch.empty((0,self.max_sentence_num*768)).to(device) # num_comment * (max_sentence_num*768)
+        vectors = torch.empty((0,self.sentence_num*768)).to(device) # num_comment * (max_sentence_num*768)
         for comment in comments:
             sents = self.text2sent(comment)
             embs = self.sent2emb(sents) # num_sentence * 768
-            embs, masks = self.embedding_padding(embs) # embs: num_sentence * 768 masks: 85 * 85
+            embs, masks = self.embedding_padding(embs) # embs: num_sentence * 768 masks: 1 * 85
             embs.to(device)
             masks.to(device)
             self.encoder.to(device)
@@ -100,13 +100,21 @@ class model(nn.Module):
 
     def embedding_padding(self, embs):
         num_sentence = embs.size(0)
-        num_padding = self.max_sentence_num - num_sentence
+        if num_sentence > self.sentence_num:
+            embs = embs[:self.sentence_num]
+            num_sentence = self.sentence_num
+
+            masks_ = torch.ones((self.sentence_num))
+            masks_ = masks_.unsqueeze(0).to(device)
+
+            return embs, masks_
+        num_padding = self.sentence_num - num_sentence
         padding_emb = torch.zeros((num_padding, 768)).to(device)
         embs = torch.cat((embs, padding_emb)) # max_sentence_num * 768
 
-        masks = torch.ones((self.max_sentence_num, self.max_sentence_num))
-        masks[:, num_sentence:] = 0
-        #masks[num_sentence:, :] = 0
+        # masks = torch.ones((self.sentence_num, self.sentence_num))
+        # masks[:, num_sentence:] = 0
+        # masks[num_sentence:, :] = 0
 
         masks_ = torch.ones((num_sentence))
         masks_ = torch.cat((masks_, torch.zeros((num_padding))))
@@ -199,6 +207,9 @@ def test(dataloader, model, loss_fn, max_acc):
 
 
     with torch.no_grad():
+        y_pred = torch.empty((0)).cpu()
+        y_true = torch.empty((0)).cpu()
+
         for batch in dataloader:
             texts = batch['texts']
             labels = batch['labels'].to(device)
@@ -208,25 +219,29 @@ def test(dataloader, model, loss_fn, max_acc):
             test_loss += loss_fn(outputs, labels).item()
             acc += (outputs.softmax(1).argmax(1) == labels).type(torch.float).sum().item()
 
+            y_pred = torch.cat((y_pred, outputs.softmax(1).argmax(1).cpu()))
+            y_true = torch.cat((y_true, labels.cpu()))
+
         test_loss /= size
         acc /= size
 
-        y_true = outputs.softmax(1).argmax(1).cpu()
-        y_pred = labels.cpu()
+        #y_pred = outputs.softmax(1).argmax(1).cpu()
+        # y_true = labels.cpu()
 
         print('Test loss: {:.3f}, Accuracy: {:.3f}%'.format(test_loss, acc*100))
         #print(precision_recall_fscore_support(y_true, y_pred, average=None, labels =[0, 1, 2]))
         if max_acc <= acc:
-            torch.save(model.state_dict(), './model.pt')
+            torch.save(model.state_dict(), './btf_is_{}.pt'.format(model.sentence_num))
             max_acc = acc
 
     return y_true, y_pred, max_acc
 
 
 
-max_sent_num = get_max_sent_num(basedata['comment_text'].tolist())
+# max_sent_num = get_max_sent_num(basedata['comment_text'].tolist())
+sent_num = 10
 
-model = model(768, 768, 3, max_sent_num, dropout=0.2)
+model = model(768, 768, 3, sentence_num=sent_num, dropout=0.2)
 model.to(device)
 
 label_vec = label_onehot((train_data['is_score']).tolist())
@@ -258,5 +273,4 @@ for i in tqdm(range(num_epochs)):
     print('support   :', result[2])
     print('='*50)
 
-
-
+print('max accuracy: {}'.format(max_acc))
